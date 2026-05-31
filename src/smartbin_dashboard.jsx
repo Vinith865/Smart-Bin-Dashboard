@@ -4,6 +4,7 @@ import {
   Route as RouteIcon, BarChart3, FileText, Users, Cpu, Settings,
   HelpCircle, Bell, Calendar, ChevronDown, MapPin, Activity, Plus,
   RefreshCw, CheckCircle2, Copy, Trash2, Leaf, Battery, Signal, Gauge,
+  Sun, Moon,
 } from "lucide-react";
 import {
   AreaChart, Area, ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
@@ -46,6 +47,208 @@ const DEMO_TELEMETRY = {
 
 /* ---- sparkline data (synthetic — replace with real history later) ---- */
 const spark = (seed) => Array.from({ length: 12 }, (_, i) => ({ v: 50 + Math.sin(i / 2 + seed) * 12 + (i * (seed % 3 - 1)) }));
+
+/* =========================================================================
+   Theme system — premium light & dark, persisted to localStorage
+   ========================================================================= */
+function useTheme() {
+  const [theme, setTheme] = useState(() => {
+    try {
+      const saved = localStorage.getItem("smartbin-theme");
+      if (saved === "dark" || saved === "light") return saved;
+    } catch (_) {}
+    return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
+  useEffect(() => {
+    try { localStorage.setItem("smartbin-theme", theme); } catch (_) {}
+  }, [theme]);
+  const toggle = useCallback(() => setTheme((t) => (t === "dark" ? "light" : "dark")), []);
+  return { theme, toggle };
+}
+
+/* Premium animated theme toggle — sliding sun/moon switch */
+function ThemeToggle({ theme, toggle }) {
+  const dark = theme === "dark";
+  return (
+    <button
+      onClick={toggle}
+      aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
+      title={dark ? "Switch to light" : "Switch to dark"}
+      className="theme-toggle"
+    >
+      <span className={`theme-toggle-knob ${dark ? "is-dark" : ""}`}>
+        {dark
+          ? <Moon className="h-3.5 w-3.5" strokeWidth={2.5} />
+          : <Sun  className="h-3.5 w-3.5" strokeWidth={2.5} />}
+      </span>
+      <Sun  className={`theme-toggle-icon theme-toggle-sun  ${dark ? "is-dim" : ""}`} />
+      <Moon className={`theme-toggle-icon theme-toggle-moon ${dark ? "" : "is-dim"}`} />
+    </button>
+  );
+}
+
+/* Global stylesheet — light defaults + premium dark overrides. */
+function ThemeStyles() {
+  return (
+    <style>{`
+      :root {
+        --tx-base: 220ms cubic-bezier(.4,0,.2,1);
+      }
+      html, body, #root { background: #f8fafc; }
+      body, button, input, select, textarea { transition: background-color var(--tx-base), color var(--tx-base), border-color var(--tx-base); }
+
+      /* Premium toggle */
+      .theme-toggle {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        width: 64px;
+        height: 32px;
+        padding: 0 8px;
+        border-radius: 999px;
+        border: 1px solid #e2e8f0;
+        background: linear-gradient(180deg, #f8fafc 0%, #eef2f6 100%);
+        box-shadow: inset 0 1px 2px rgba(15,23,42,.06);
+        cursor: pointer;
+        transition: all var(--tx-base);
+      }
+      .theme-toggle:hover { border-color: #cbd5e1; }
+      .theme-toggle-icon {
+        position: absolute; height: 14px; width: 14px;
+        color: #94a3b8; transition: opacity var(--tx-base), color var(--tx-base);
+      }
+      .theme-toggle-sun  { left: 9px;  color: #f59e0b; }
+      .theme-toggle-moon { right: 9px; color: #64748b; }
+      .theme-toggle-icon.is-dim { opacity: .25; }
+      .theme-toggle-knob {
+        position: absolute;
+        top: 3px; left: 3px;
+        height: 24px; width: 24px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%);
+        box-shadow: 0 2px 5px rgba(15,23,42,.18), 0 0 0 1px rgba(15,23,42,.05);
+        display: grid; place-items: center;
+        color: #f59e0b;
+        transform: translateX(0);
+        transition: transform var(--tx-base), background var(--tx-base), color var(--tx-base);
+      }
+      .theme-toggle-knob.is-dark {
+        transform: translateX(32px);
+        background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+        color: #e2e8f0;
+        box-shadow: 0 2px 5px rgba(0,0,0,.45), 0 0 0 1px rgba(148,163,184,.15);
+      }
+
+      /* ====================== DARK THEME ====================== */
+      .dark { color-scheme: dark; }
+      .dark, .dark body, .dark #root { background: #070b14 !important; color: #f1f5f9 !important; }
+
+      /* default text colour for everything in dark mode (catches un-classed text) */
+      .dark, .dark * { color: #f1f5f9; }
+      .dark h1, .dark h2, .dark h3, .dark h4, .dark h5, .dark h6,
+      .dark b, .dark strong, .dark .font-semibold, .dark .font-medium,
+      .dark .font-bold { color: #ffffff !important; }
+      .dark label { color: #e2e8f0 !important; }
+
+      /* root chrome */
+      .dark .bg-slate-50  { background-color: #070b14 !important; }
+      .dark .bg-slate-100 { background-color: #182238 !important; }
+      .dark .bg-slate-200 { background-color: #243049 !important; }
+      .dark .bg-white     { background-color: #0f1525 !important; background-image: linear-gradient(180deg, #151d31 0%, #0f1525 100%) !important; }
+
+      /* borders */
+      .dark .border-slate-100 { border-color: #1f2a40 !important; }
+      .dark .border-slate-200 { border-color: #2a3852 !important; }
+      .dark .border-slate-300 { border-color: #364664 !important; }
+      .dark .border-b, .dark .border-t, .dark .border-r, .dark .border-l { border-color: #2a3852; }
+
+      /* text — brighter for readability */
+      .dark .text-slate-900 { color: #ffffff !important; }
+      .dark .text-slate-800 { color: #f1f5f9 !important; }
+      .dark .text-slate-700 { color: #e2e8f0 !important; }
+      .dark .text-slate-600 { color: #d1dae8 !important; }
+      .dark .text-slate-500 { color: #c0cbdc !important; }
+      .dark .text-slate-400 { color: #a7b4ca !important; }
+      .dark .text-black     { color: #ffffff !important; }
+      .dark .text-gray-900, .dark .text-zinc-900, .dark .text-neutral-900 { color: #ffffff !important; }
+      .dark .text-gray-800, .dark .text-zinc-800, .dark .text-neutral-800 { color: #f1f5f9 !important; }
+      .dark .text-gray-700, .dark .text-zinc-700, .dark .text-neutral-700 { color: #e2e8f0 !important; }
+      .dark .text-gray-600, .dark .text-zinc-600, .dark .text-neutral-600 { color: #d1dae8 !important; }
+      .dark .text-gray-500, .dark .text-zinc-500, .dark .text-neutral-500 { color: #c0cbdc !important; }
+      .dark .text-gray-400, .dark .text-zinc-400, .dark .text-neutral-400 { color: #a7b4ca !important; }
+      .dark code, .dark pre { color: #f1f5f9 !important; background-color: rgba(148,163,184,.12) !important; }
+
+      /* hover surfaces */
+      .dark .hover\\:bg-slate-50:hover  { background-color: #1c2740 !important; }
+      .dark .hover\\:bg-slate-100:hover { background-color: #22304a !important; }
+
+      /* tinted accent surfaces — brighter foregrounds for visibility */
+      .dark .bg-emerald-50  { background-color: rgba(16,185,129,.16) !important; }
+      .dark .border-emerald-100, .dark .border-emerald-200 { border-color: rgba(16,185,129,.45) !important; }
+      .dark .text-emerald-800, .dark .text-emerald-700, .dark .text-emerald-600 { color: #6ee7b7 !important; }
+      .dark .text-emerald-500 { color: #34d399 !important; }
+      .dark .text-emerald-700\\/80 { color: #6ee7b7 !important; opacity: 1 !important; }
+
+      .dark .bg-amber-50    { background-color: rgba(245,158,11,.15) !important; }
+      .dark .border-amber-200 { border-color: rgba(245,158,11,.5) !important; }
+      .dark .text-amber-800, .dark .text-amber-700, .dark .text-amber-600 { color: #fcd34d !important; }
+
+      .dark .bg-rose-50     { background-color: rgba(244,63,94,.16) !important; }
+      .dark .border-rose-200{ border-color: rgba(244,63,94,.5) !important; }
+      .dark .text-rose-500, .dark .text-rose-700, .dark .text-rose-600, .dark .text-rose-800 { color: #fda4af !important; }
+
+      .dark .bg-blue-50     { background-color: rgba(59,130,246,.15) !important; }
+      .dark .text-blue-500, .dark .text-blue-600, .dark .text-blue-700 { color: #93c5fd !important; }
+
+      /* opacity-suffixed text utilities (text-x/80 etc.) */
+      .dark [class*="text-"][class*="\\/80"], .dark [class*="text-"][class*="\\/70"], .dark [class*="text-"][class*="\\/60"] { opacity: 1 !important; }
+
+      /* placeholder text in inputs */
+      .dark .placeholder\\:text-slate-400::placeholder { color: #94a3b8 !important; }
+
+      /* premium toggle in dark */
+      .dark .theme-toggle {
+        border-color: #2c3a55;
+        background: linear-gradient(180deg, #1a2236 0%, #131a2a 100%);
+        box-shadow: inset 0 1px 2px rgba(0,0,0,.45);
+      }
+      .dark .theme-toggle:hover { border-color: #3d4f72; }
+
+      /* cards: subtle glow on hover */
+      .dark .rounded-xl.border, .dark .rounded-lg.border {
+        box-shadow: 0 1px 2px rgba(0,0,0,.4), 0 0 0 1px rgba(148,163,184,.02);
+      }
+
+      /* inputs */
+      .dark input, .dark select, .dark textarea {
+        background-color: #131a2a !important;
+        color: #e2e8f0 !important;
+        border-color: #2c3a55 !important;
+      }
+      .dark input::placeholder, .dark textarea::placeholder { color: #64748b !important; }
+
+      /* table rows */
+      .dark thead { background-color: #131a2a !important; }
+      .dark tbody tr { border-color: #1c2436 !important; }
+
+      /* recharts text */
+      .dark .recharts-text { fill: #94a3b8 !important; }
+      .dark .recharts-tooltip-wrapper > div {
+        background-color: #131a2a !important;
+        border-color: #2c3a55 !important;
+        color: #e2e8f0 !important;
+      }
+      .dark .recharts-default-tooltip { background-color: #131a2a !important; border-color: #2c3a55 !important; }
+
+      /* scrollbars */
+      .dark *::-webkit-scrollbar           { width: 10px; height: 10px; }
+      .dark *::-webkit-scrollbar-track     { background: #0b1120; }
+      .dark *::-webkit-scrollbar-thumb     { background: #2c3a55; border-radius: 5px; }
+      .dark *::-webkit-scrollbar-thumb:hover { background: #3d4f72; }
+    `}</style>
+  );
+}
 
 /* ---- sidebar nav ---- */
 const NAV = [
@@ -161,6 +364,7 @@ export default function SmartBinDashboard() {
   const [lastSync, setLastSync] = useState(null);
   const prevCriticalRef = useRef(new Set());
   const [criticalFlash, setCriticalFlash] = useState(null);   // {bin_id, at}
+  const { theme, toggle: toggleTheme } = useTheme();
 
   const onCritical = useCallback((newOnes) => {
     if (!newOnes.length) return;
@@ -230,10 +434,11 @@ export default function SmartBinDashboard() {
   }, [bins, onCritical]);
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex">
+    <div className={`${theme === "dark" ? "dark" : ""} min-h-screen bg-slate-50 text-slate-800 font-sans flex`}>
+      <ThemeStyles />
       <Sidebar active={page} setPage={setPage} />
       <div className="flex-1 flex flex-col min-w-0">
-        <TopBar page={page} lastSync={lastSync} />
+        <TopBar page={page} lastSync={lastSync} theme={theme} toggleTheme={toggleTheme} />
         {demo && (
           <div className="px-6 py-2 bg-amber-50 border-b border-amber-200 text-amber-700 text-xs">
             Showing demo data — the API at <code>{API_BASE}</code> isn't reachable yet.
@@ -304,7 +509,7 @@ function Sidebar({ active, setPage }) {
 /* =========================================================================
    TopBar
    ========================================================================= */
-function TopBar({ page, lastSync }) {
+function TopBar({ page, lastSync, theme, toggleTheme }) {
   return (
     <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center gap-4">
       <div className="flex-1">
@@ -318,6 +523,7 @@ function TopBar({ page, lastSync }) {
         <Calendar className="h-4 w-4 text-slate-400" />
         {lastSync ? lastSync.toLocaleDateString() : "—"}
       </div>
+      <ThemeToggle theme={theme} toggle={toggleTheme} />
       <button className="relative p-2 rounded-lg border border-slate-200 bg-white">
         <Bell className="h-4 w-4 text-slate-500" />
         <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] rounded-full px-1.5">12</span>
