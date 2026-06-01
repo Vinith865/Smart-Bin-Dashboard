@@ -67,6 +67,20 @@ function useTheme() {
   return { theme, toggle };
 }
 
+/* App-wide settings — sound, refresh rate, units, browser notifications */
+function useAppSettings() {
+  const read = (k, fallback) => { try { const v = localStorage.getItem(k); return v == null ? fallback : v; } catch { return fallback; } };
+  const [sound, setSound]                 = useState(() => read("smartbin-sound", "on") === "on");
+  const [refresh, setRefresh]             = useState(() => parseInt(read("smartbin-refresh", "3"), 10));
+  const [units, setUnits]                 = useState(() => read("smartbin-units", "metric"));
+  const [notifEnabled, setNotifEnabled]   = useState(() => read("smartbin-notif", "off") === "on");
+  useEffect(() => { try { localStorage.setItem("smartbin-sound",   sound ? "on" : "off"); } catch (_) {} }, [sound]);
+  useEffect(() => { try { localStorage.setItem("smartbin-refresh", String(refresh));      } catch (_) {} }, [refresh]);
+  useEffect(() => { try { localStorage.setItem("smartbin-units",   units);                } catch (_) {} }, [units]);
+  useEffect(() => { try { localStorage.setItem("smartbin-notif",   notifEnabled ? "on" : "off"); } catch (_) {} }, [notifEnabled]);
+  return { sound, setSound, refresh, setRefresh, units, setUnits, notifEnabled, setNotifEnabled };
+}
+
 /* Premium animated theme toggle — sliding sun/moon switch */
 function ThemeToggle({ theme, toggle }) {
   const dark = theme === "dark";
@@ -366,13 +380,17 @@ export default function SmartBinDashboard() {
   const prevCriticalRef = useRef(new Set());
   const [criticalFlash, setCriticalFlash] = useState(null);   // {bin_id, at}
   const { theme, toggle: toggleTheme } = useTheme();
+  const settings = useAppSettings();
 
   const onCritical = useCallback((newOnes) => {
     if (!newOnes.length) return;
-    playCriticalBeep(10);
+    if (settings.sound) playCriticalBeep(10);
+    if (settings.notifEnabled && "Notification" in window && Notification.permission === "granted") {
+      newOnes.forEach((b) => new Notification(`SmartBin alert: ${b.bin_id}`, { body: `Bin is ${b.fill}% full and needs collection.` }));
+    }
     setCriticalFlash({ ids: newOnes.map(b => b.bin_id), at: Date.now() });
     setTimeout(() => setCriticalFlash(null), 10000);
-  }, []);
+  }, [settings.sound, settings.notifEnabled]);
 
   const loadRegistry = useCallback(async () => {
     try {
@@ -416,7 +434,11 @@ export default function SmartBinDashboard() {
   }, []);
 
   useEffect(() => { loadRegistry(); loadTelemetry(); }, [loadRegistry, loadTelemetry]);
-  useEffect(() => { const id = setInterval(loadTelemetry, POLL_MS); return () => clearInterval(id); }, [loadTelemetry]);
+  useEffect(() => {
+    const ms = Math.max(1, settings.refresh) * 1000;
+    const id = setInterval(loadTelemetry, ms);
+    return () => clearInterval(id);
+  }, [loadTelemetry, settings.refresh]);
 
   const bins = useMemo(() => registry.map((m) => {
     const live = telemetry[m.bin_id] || null;
@@ -450,12 +472,41 @@ export default function SmartBinDashboard() {
     }].slice(-30));
   }, [bins]);
 
+  // Per-day rollups persisted to localStorage (last 90 days kept)
+  const [daily, setDaily] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("smartbin-daily") || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    if (!bins.length) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const total    = bins.length;
+    const online   = bins.filter((b) => b.online).length;
+    const critical = bins.filter((b) => b.status === "Critical").length;
+    const watch    = bins.filter((b) => b.status === "Watch").length;
+    const offline  = bins.filter((b) => b.status === "Offline").length;
+    const avg      = Math.round(bins.reduce((s, b) => s + (b.fill || 0), 0) / total);
+    const peak     = Math.max(...bins.map((b) => b.fill || 0));
+
+    setDaily((prev) => {
+      const existing = prev.find((d) => d.date === today);
+      const samples  = (existing?.samples || 0) + 1;
+      const ravg     = existing ? Math.round((existing.avg * (samples - 1) + avg) / samples) : avg;
+      const peakHi   = existing ? Math.max(existing.peak, peak) : peak;
+      const critHi   = existing ? Math.max(existing.critical, critical) : critical;
+      const row = { date: today, total, online, critical: critHi, watch, offline, avg: ravg, peak: peakHi, samples };
+      const next = existing ? prev.map((d) => d.date === today ? row : d) : [...prev, row];
+      const last90 = next.slice(-90);
+      try { localStorage.setItem("smartbin-daily", JSON.stringify(last90)); } catch (_) {}
+      return last90;
+    });
+  }, [bins]);
+
   return (
     <div className={`${theme === "dark" ? "dark" : ""} min-h-screen bg-slate-50 text-slate-800 font-sans flex`}>
       <ThemeStyles />
       <Sidebar active={page} setPage={setPage} />
       <div className="flex-1 flex flex-col min-w-0">
-        <TopBar page={page} lastSync={lastSync} theme={theme} toggleTheme={toggleTheme} />
+        <TopBar page={page} lastSync={lastSync} theme={theme} toggleTheme={toggleTheme} bins={bins} setPage={setPage} />
         {demo && (
           <div className="px-6 py-2 bg-amber-50 border-b border-amber-200 text-amber-700 text-xs">
             Showing demo data — the API at <code>{API_BASE}</code> isn't reachable yet.
@@ -467,15 +518,15 @@ export default function SmartBinDashboard() {
           </div>
         )}
         <main className="p-6 flex-1 overflow-auto">
-          {page === "Dashboard"  && <DashboardPage bins={bins} events={events} onCritical={onCritical} />}
+          {page === "Dashboard"  && <DashboardPage bins={bins} onCritical={onCritical} />}
           {page === "Map View"   && <MapViewPage bins={bins} />}
-          {page === "Alerts"     && <AlertsPage bins={bins} events={events} />}
+          {page === "Alerts"     && <AlertsPage bins={bins} daily={daily} />}
           {page === "Routes"     && <RoutesPage bins={bins} />}
-          {page === "Analytics"  && <AnalyticsPage bins={bins} trend={trend} />}
-          {page === "Reports"    && <ReportsPage bins={bins} />}
+          {page === "Analytics"  && <AnalyticsPage bins={bins} trend={trend} daily={daily} />}
+          {page === "Reports"    && <ReportsPage bins={bins} daily={daily} />}
           {page === "Users"      && <UsersPage />}
           {page === "Devices"    && <DevicesPage bins={bins} />}
-          {page === "Settings"   && <SettingsPage />}
+          {page === "Settings"   && <SettingsPage theme={theme} toggleTheme={toggleTheme} settings={settings} />}
         </main>
         <FooterBar bins={bins} lastSync={lastSync} />
       </div>
@@ -526,7 +577,33 @@ function Sidebar({ active, setPage }) {
 /* =========================================================================
    TopBar
    ========================================================================= */
-function TopBar({ page, lastSync, theme, toggleTheme }) {
+function TopBar({ page, lastSync, theme, toggleTheme, bins = [], setPage }) {
+  const [notifOpen, setNotifOpen] = useState(false);
+  const notifRef = useRef(null);
+
+  // Real notifications derived from current fleet
+  const notifications = useMemo(() => {
+    const list = [];
+    bins.forEach((b) => {
+      if (b.status === "Critical") list.push({ id: b.bin_id, type: "critical", title: `${b.bin_id} is ${b.fill}% full`, sub: `${b.place || ""} ${b.route ? "· " + b.route : ""}`.trim() || "Needs collection" });
+      else if (b.status === "Offline") list.push({ id: b.bin_id, type: "offline", title: `${b.bin_id} is offline`, sub: "No telemetry received recently" });
+      else if (b.status === "Watch") list.push({ id: b.bin_id, type: "watch", title: `${b.bin_id} approaching full (${b.fill}%)`, sub: `${b.place || ""}`.trim() || "Watch level" });
+    });
+    return list;
+  }, [bins]);
+  const critCount = notifications.filter((n) => n.type === "critical").length;
+  const totalCount = notifications.length;
+
+  // close dropdown on outside click
+  useEffect(() => {
+    if (!notifOpen) return;
+    const onClick = (e) => { if (notifRef.current && !notifRef.current.contains(e.target)) setNotifOpen(false); };
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, [notifOpen]);
+
+  const tint = { critical: STATUS_COLOR.Critical, offline: STATUS_COLOR.Offline, watch: STATUS_COLOR.Watch };
+
   return (
     <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center gap-4">
       <div className="flex-1">
@@ -541,10 +618,50 @@ function TopBar({ page, lastSync, theme, toggleTheme }) {
         {lastSync ? lastSync.toLocaleDateString() : "—"}
       </div>
       <ThemeToggle theme={theme} toggle={toggleTheme} />
-      <button className="relative p-2 rounded-lg border border-slate-200 bg-white">
-        <Bell className="h-4 w-4 text-slate-500" />
-        <span className="absolute -top-1 -right-1 bg-rose-500 text-white text-[10px] rounded-full px-1.5">12</span>
-      </button>
+
+      <div className="relative" ref={notifRef}>
+        <button onClick={() => setNotifOpen((o) => !o)}
+                className="relative p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-50">
+          <Bell className="h-4 w-4 text-slate-500" />
+          {totalCount > 0 && (
+            <span className={`absolute -top-1 -right-1 ${critCount ? "bg-rose-500" : "bg-amber-500"} text-white text-[10px] rounded-full px-1.5 min-w-[18px] text-center`}>
+              {totalCount}
+            </span>
+          )}
+        </button>
+
+        {notifOpen && (
+          <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-auto rounded-xl border border-slate-200 bg-white shadow-lg z-50">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <div className="font-semibold text-sm">Notifications</div>
+              <div className="text-[11px] text-slate-500">{totalCount} active</div>
+            </div>
+            {notifications.length === 0 ? (
+              <div className="p-6 text-center text-sm text-slate-500">All bins healthy 🎉</div>
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {notifications.map((n) => (
+                  <li key={n.id + n.type}
+                      onClick={() => { setNotifOpen(false); setPage && setPage("Alerts"); }}
+                      className="px-4 py-3 hover:bg-slate-50 cursor-pointer">
+                    <div className="flex items-start gap-3">
+                      <span className="mt-1 h-2 w-2 rounded-full shrink-0" style={{ background: tint[n.type] }} />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium truncate">{n.title}</div>
+                        <div className="text-xs text-slate-500 truncate">{n.sub}</div>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <div className="px-4 py-2 border-t border-slate-100 text-right">
+              <button onClick={() => { setNotifOpen(false); setPage && setPage("Alerts"); }}
+                      className="text-xs text-emerald-600 hover:underline">View all alerts</button>
+            </div>
+          </div>
+        )}
+      </div>
       <div className="flex items-center gap-2 pl-2">
         <div className="h-9 w-9 rounded-full bg-slate-200 grid place-items-center text-sm font-medium">A</div>
         <div className="hidden md:block leading-tight">
@@ -575,7 +692,14 @@ function FooterBar({ bins, lastSync }) {
 /* =========================================================================
    Dashboard page (the big one)
    ========================================================================= */
-function DashboardPage({ bins, events, onCritical }) {
+function DashboardPage({ bins, onCritical }) {
+  // Derive "Recent Activity" entirely from real bins — no synthetic event store.
+  const recent = useMemo(() => {
+    return [...bins]
+      .filter((b) => b.live)                                       // only bins reporting telemetry
+      .sort((a, b) => (b.live?.updated_at || 0) - (a.live?.updated_at || 0))
+      .slice(0, 8);
+  }, [bins]);
   const kpis = useMemo(() => {
     const total = bins.length;
     const active = bins.filter((b) => b.online).length;
@@ -595,20 +719,6 @@ function DashboardPage({ bins, events, onCritical }) {
     return c;
   }, [bins]);
 
-  const distribution = useMemo(() => {
-    const buckets = [
-      { range: "0-20%",   max: 20,  count: 0, color: "#10b981" },
-      { range: "21-40%",  max: 40,  count: 0, color: "#10b981" },
-      { range: "41-60%",  max: 60,  count: 0, color: "#f59e0b" },
-      { range: "61-80%",  max: 80,  count: 0, color: "#f59e0b" },
-      { range: "81-100%", max: 100, count: 0, color: "#ef4444" },
-    ];
-    bins.forEach((b) => {
-      const idx = buckets.findIndex((bk) => b.fill <= bk.max);
-      if (idx >= 0) buckets[idx].count++;
-    });
-    return buckets;
-  }, [bins]);
 
   const critical = useMemo(() =>
     bins.filter((b) => b.fill >= CRITICAL_AT || b.status === "Offline").slice(0, 5),
@@ -627,13 +737,40 @@ function DashboardPage({ bins, events, onCritical }) {
 
       {/* Map + right column */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <Card title="Live Bin Locations" className="xl:col-span-2" >
-          <FleetMap bins={bins} height={420} mapId="dashboard-map" />
+        <Card title="Live Bin Locations" className="xl:col-span-2 flex flex-col" >
+          <FleetMap bins={bins} height={520} mapId="dashboard-map" />
           <div className="flex flex-wrap items-center gap-4 text-xs text-slate-600 mt-3">
             <Legend color={STATUS_COLOR.Optimal} label="0 - 40%" />
             <Legend color={STATUS_COLOR.Watch}   label="41 - 70%" />
             <Legend color={STATUS_COLOR.Critical} label="71 - 100%" />
             <Legend color={STATUS_COLOR.Offline} label="Offline" />
+          </div>
+          {/* Live bin status strip — fills the bottom space below the map */}
+          <div className="mt-4 border-t border-slate-100 pt-4">
+            <div className="text-xs font-semibold text-slate-700 mb-2">Live readings</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+              {bins.filter((b) => b.live).slice(0, 8).map((b) => (
+                <div key={b.bin_id} className="border border-slate-200 rounded-lg p-2.5 bg-white">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-medium truncate">{b.bin_id}</div>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full"
+                          style={{ background: STATUS_COLOR[b.status] + "22", color: STATUS_COLOR[b.status] }}>
+                      {b.status}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div className="h-full transition-all" style={{ width: `${b.fill}%`, background: STATUS_COLOR[b.status] }} />
+                  </div>
+                  <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500">
+                    <span className="tabular-nums font-medium text-slate-700">{b.fill}%</span>
+                    <span className="truncate">{b.place || "—"}</span>
+                  </div>
+                </div>
+              ))}
+              {bins.filter((b) => b.live).length === 0 && (
+                <div className="col-span-full text-center text-sm text-slate-500 py-4">No live bins reporting yet</div>
+              )}
+            </div>
           </div>
         </Card>
 
@@ -687,44 +824,26 @@ function DashboardPage({ bins, events, onCritical }) {
             </div>
           </Card>
 
-          <Card title="Recent Activity" actions={<a className="text-xs text-emerald-600">View all</a>}>
+          <Card title="Recent Activity" actions={<span className="text-xs text-slate-500">live</span>}>
             <ul className="space-y-3 max-h-60 overflow-auto">
-              {events.length === 0 && <li className="text-sm text-slate-500">Waiting for telemetry…</li>}
-              {events.slice(0, 6).map((e) => (
-                <li key={e.key} className="flex items-start gap-3">
-                  <div className="h-8 w-8 rounded-full bg-slate-100 grid place-items-center">
-                    <Trash2 className="h-3.5 w-3.5 text-slate-500" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm truncate">Bin {e.bin_id} now <b>{e.fill}%</b> — {e.status}</div>
-                    <div className="text-xs text-slate-500">{e.at.toLocaleTimeString()}</div>
-                  </div>
-                </li>
-              ))}
+              {recent.length === 0 && <li className="text-sm text-slate-500">Waiting for telemetry…</li>}
+              {recent.map((b) => {
+                const ts = b.live?.updated_at ? new Date(b.live.updated_at * 1000).toLocaleTimeString() : "—";
+                return (
+                  <li key={b.bin_id} className="flex items-start gap-3">
+                    <div className={`h-8 w-8 rounded-full grid place-items-center`} style={{ background: STATUS_COLOR[b.status] + "22" }}>
+                      <Trash2 className="h-3.5 w-3.5" style={{ color: STATUS_COLOR[b.status] }} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm truncate">Bin {b.bin_id} now <b>{b.fill}%</b> — {b.status}</div>
+                      <div className="text-xs text-slate-500">{ts}</div>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           </Card>
         </div>
-      </div>
-
-      {/* Bottom row: distribution */}
-      <div className="grid grid-cols-1 gap-4">
-        <Card title="Fill Level Distribution">
-          <div style={{ width: "100%", height: 220 }}>
-            <ResponsiveContainer>
-              <BarChart data={distribution} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                <XAxis dataKey="range" axisLine={false} tickLine={false} fontSize={11} stroke="#94a3b8" />
-                <YAxis hide />
-                <Tooltip cursor={{ fill: "#f1f5f9" }} contentStyle={{ borderRadius: 8, fontSize: 12 }} />
-                <Bar dataKey="count" radius={[8, 8, 0, 0]}>
-                  {distribution.map((d, i) => <Cell key={i} fill={d.color} />)}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-          <div className="text-[11px] text-slate-500 text-center mt-1">Fill Level (%)</div>
-        </Card>
-
-        
       </div>
     </div>
   );
@@ -796,9 +915,10 @@ function MapViewPage({ bins }) {
   );
 }
 
-function AlertsPage({ bins, events }) {
+function AlertsPage({ bins, daily = [] }) {
   const live = bins.filter((b) => b.fill >= CRITICAL_AT || b.status === "Offline");
-  const history = events.filter((e) => e.status === "Critical" || e.status === "Watch").slice(0, 30);
+  // Real day-wise alert history from the persistent rollups
+  const history = [...daily].reverse().filter((d) => d.critical > 0);
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <Card title={`Active alerts (${live.length})`} className="lg:col-span-2">
@@ -817,13 +937,15 @@ function AlertsPage({ bins, events }) {
           </tbody>
         </table>
       </Card>
-      <Card title="Alert history (recent)">
+      <Card title="Alert history (day-wise)">
         <ul className="divide-y divide-slate-100 max-h-[28rem] overflow-auto">
-          {history.length === 0 && <li className="py-3 text-sm text-slate-500">No recent alerts.</li>}
-          {history.map((e) => (
-            <li key={e.key} className="py-2.5">
-              <div className="text-sm">{e.bin_id} — <b>{e.fill}%</b> · {e.status}</div>
-              <div className="text-[11px] text-slate-500">{e.at.toLocaleString()}</div>
+          {history.length === 0 && <li className="py-3 text-sm text-slate-500">No critical alerts on record yet.</li>}
+          {history.map((d) => (
+            <li key={d.date} className="py-2.5">
+              <div className="text-sm font-medium">{d.date}</div>
+              <div className="text-xs text-slate-500">
+                Peak critical: <b className="text-rose-600">{d.critical}</b> · Watch: {d.watch} · Avg fill: {d.avg}% · Peak fill: {d.peak}%
+              </div>
             </li>
           ))}
         </ul>
@@ -1153,36 +1275,160 @@ function AnalyticsStat({ label, value, icon: Icon, tint = "emerald" }) {
   );
 }
 
-function ReportsPage({ bins }) {
+function ReportsPage({ bins, daily = [] }) {
   const total = bins.length;
   const critical = bins.filter((b) => b.status === "Critical").length;
   const watch = bins.filter((b) => b.status === "Watch").length;
   const optimal = bins.filter((b) => b.status === "Optimal").length;
   const offline = bins.filter((b) => b.status === "Offline").length;
   const avg = total ? Math.round(bins.reduce((s, b) => s + (b.fill || 0), 0) / total) : 0;
-  const csv = "bin_id,bin_name,route,ward,fill,status\n" +
-    bins.map((b) => `${b.bin_id},${b.bin_name},${b.route},${b.ward},${b.fill},${b.status}`).join("\n");
-  const download = () => {
+
+  // -- CSV builders -------------------------------------------------------
+  const downloadCsv = (filename, csv) => {
     const blob = new Blob([csv], { type: "text/csv" });
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob); a.download = `smartbin-snapshot-${Date.now()}.csv`; a.click();
+    a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  const downloadSnapshot = () => {
+    const csv = "bin_id,bin_name,route,ward,place,fill,status,battery,rssi,latitude,longitude\n" +
+      bins.map((b) => [b.bin_id, b.bin_name, b.route, b.ward, b.place, b.fill, b.status, b.battery ?? "", b.rssi ?? "", b.latitude ?? "", b.longitude ?? ""].join(",")).join("\n");
+    downloadCsv(`smartbin-snapshot-${new Date().toISOString().slice(0, 10)}.csv`, csv);
+  };
+  const downloadDaily = () => {
+    const csv = "date,total_bins,online,critical,watch,offline,avg_fill_percent,peak_fill_percent,samples\n" +
+      daily.map((d) => [d.date, d.total, d.online, d.critical, d.watch, d.offline, d.avg, d.peak, d.samples].join(",")).join("\n");
+    downloadCsv(`smartbin-daily-history-${new Date().toISOString().slice(0, 10)}.csv`, csv);
+  };
+  const downloadDay = (date) => {
+    const d = daily.find((x) => x.date === date);
+    if (!d) return;
+    const csv = "date,total_bins,online,critical,watch,offline,avg_fill_percent,peak_fill_percent,samples\n" +
+      [d.date, d.total, d.online, d.critical, d.watch, d.offline, d.avg, d.peak, d.samples].join(",");
+    downloadCsv(`smartbin-${d.date}.csv`, csv);
+  };
+
+  const chartData = [...daily].slice(-14); // last 14 days
+
+  return (
+    <div className="space-y-4">
+      {/* Snapshot strip */}
+      <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
+        <ReportStat label="Total"    value={total} tint="emerald" />
+        <ReportStat label="Avg fill" value={`${avg}%`} tint={avg >= CRITICAL_AT ? "rose" : avg >= WATCH_AT ? "amber" : "emerald"} />
+        <ReportStat label="Critical" value={critical} tint="rose" />
+        <ReportStat label="Watch"    value={watch} tint="amber" />
+        <ReportStat label="Optimal"  value={optimal} tint="emerald" />
+        <ReportStat label="Offline"  value={offline} tint="slate" />
+      </div>
+
+      {/* Day-wise chart */}
+      <Card title={`Day-wise fleet trend (${chartData.length}/${daily.length} days)`}
+            actions={
+              <div className="flex gap-2">
+                <button onClick={downloadSnapshot} className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 inline-flex items-center gap-1">
+                  <FileText className="h-3.5 w-3.5" /> Snapshot CSV
+                </button>
+                <button onClick={downloadDaily}
+                        disabled={daily.length === 0}
+                        className="text-xs px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white inline-flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed">
+                  <FileText className="h-3.5 w-3.5" /> Daily history CSV
+                </button>
+              </div>
+            }>
+        <div style={{ width: "100%", height: 280 }}>
+          {chartData.length === 0 ? (
+            <div className="h-full grid place-items-center text-sm text-slate-500">
+              No daily data yet — keep the dashboard open and rollups will accumulate.
+            </div>
+          ) : (
+            <ResponsiveContainer>
+              <AreaChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="gradDailyAvg" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%"   stopColor="#10b981" stopOpacity={0.55} />
+                    <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="gradDailyCrit" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%"   stopColor="#ef4444" stopOpacity={0.45} />
+                    <stop offset="100%" stopColor="#ef4444" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="date" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} tickFormatter={(d) => d.slice(5)} />
+                <YAxis stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+                <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #e2e8f0" }} />
+                <RLegend verticalAlign="top" height={28} iconType="circle" wrapperStyle={{ fontSize: 12 }} />
+                <Area type="monotone" dataKey="avg"      name="Avg fill %"  stroke="#10b981" strokeWidth={2.5} fill="url(#gradDailyAvg)"  isAnimationActive={false} />
+                <Area type="monotone" dataKey="critical" name="Peak critical" stroke="#ef4444" strokeWidth={2}  fill="url(#gradDailyCrit)" isAnimationActive={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </Card>
+
+      {/* Day-wise table — every row has its own download button */}
+      <Card title="Daily history">
+        <div className="overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="text-xs text-slate-500">
+              <tr className="text-left border-b border-slate-100">
+                <th className="pb-2">Date</th>
+                <th>Total</th>
+                <th>Online</th>
+                <th>Critical</th>
+                <th>Watch</th>
+                <th>Offline</th>
+                <th>Avg fill</th>
+                <th>Peak fill</th>
+                <th>Samples</th>
+                <th className="text-right">Download</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {[...daily].reverse().map((d) => (
+                <tr key={d.date}>
+                  <td className="py-2 font-medium tabular-nums">{d.date}</td>
+                  <td className="text-slate-600">{d.total}</td>
+                  <td className="text-emerald-600">{d.online}</td>
+                  <td className="text-rose-600">{d.critical}</td>
+                  <td className="text-amber-600">{d.watch}</td>
+                  <td className="text-slate-500">{d.offline}</td>
+                  <td className="tabular-nums">{d.avg}%</td>
+                  <td className="tabular-nums">{d.peak}%</td>
+                  <td className="text-slate-500 tabular-nums">{d.samples}</td>
+                  <td className="text-right">
+                    <button onClick={() => downloadDay(d.date)}
+                            className="text-xs px-2 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 inline-flex items-center gap-1">
+                      <FileText className="h-3 w-3" /> CSV
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {daily.length === 0 && (
+                <tr><td colSpan={10} className="py-6 text-center text-slate-500">No daily history yet.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function ReportStat({ label, value, tint = "emerald" }) {
+  const tints = {
+    emerald: "text-emerald-600 bg-emerald-50",
+    rose:    "text-rose-600 bg-rose-50",
+    amber:   "text-amber-600 bg-amber-50",
+    slate:   "text-slate-600 bg-slate-100",
   };
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <Card title="Fleet snapshot">
-        <ul className="text-sm space-y-2">
-          <li className="flex justify-between"><span>Total bins</span><b>{total}</b></li>
-          <li className="flex justify-between"><span>Average fill</span><b>{avg}%</b></li>
-          <li className="flex justify-between"><span>Critical</span><b className="text-rose-600">{critical}</b></li>
-          <li className="flex justify-between"><span>Watch</span><b className="text-amber-600">{watch}</b></li>
-          <li className="flex justify-between"><span>Optimal</span><b className="text-emerald-600">{optimal}</b></li>
-          <li className="flex justify-between"><span>Offline</span><b className="text-slate-500">{offline}</b></li>
-        </ul>
-      </Card>
-      <Card title="Export">
-        <p className="text-sm text-slate-600 mb-3">Download the current fleet state as a CSV.</p>
-        <button onClick={download} className="rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 text-sm font-medium">Download CSV</button>
-      </Card>
+    <div className="bg-white rounded-xl border border-slate-200 p-3">
+      <div className="text-[11px] uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="mt-1 inline-flex px-2 py-0.5 rounded-md text-lg font-semibold tabular-nums">
+        <span className={tints[tint] + " px-2 py-0.5 rounded-md"}>{value}</span>
+      </div>
     </div>
   );
 }
@@ -1235,13 +1481,10 @@ function DevicesPage({ bins }) {
   );
 }
 
-function SettingsPage() {
-  const [theme, setTheme] = useState("Light");
-  const [accent, setAccent] = useState("Emerald");
-  const [sound, setSound] = useState(true);
-  const [refresh, setRefresh] = useState(3);
-  const [units, setUnits] = useState("Metric (cm, kg)");
-  const [lang, setLang] = useState("English");
+function SettingsPage({ theme, toggleTheme, settings }) {
+  const { sound, setSound, refresh, setRefresh, units, setUnits, notifEnabled, setNotifEnabled } = settings;
+  const [notifPerm, setNotifPerm] = useState(() => (typeof Notification !== "undefined" ? Notification.permission : "default"));
+  const [beepPreviewing, setBeepPreviewing] = useState(false);
 
   const Pill = ({ active, label, onClick, color }) => (
     <button onClick={onClick}
@@ -1253,41 +1496,80 @@ function SettingsPage() {
     </button>
   );
 
+  // Wire the Theme pills to the actual app-wide theme toggle.
+  const setTheme = (t) => {
+    const want = t === "Dark" ? "dark" : "light";
+    if (theme !== want) toggleTheme();
+  };
+  const themeLabel = theme === "dark" ? "Dark" : "Light";
+
+  const handleEnableNotif = async () => {
+    if (typeof Notification === "undefined") return;
+    if (Notification.permission === "granted") { setNotifEnabled(true); return; }
+    const p = await Notification.requestPermission();
+    setNotifPerm(p);
+    setNotifEnabled(p === "granted");
+  };
+
+  const previewBeep = () => {
+    if (beepPreviewing) return;
+    setBeepPreviewing(true);
+    playCriticalBeep(2);
+    setTimeout(() => setBeepPreviewing(false), 2200);
+  };
+
+  const clearLocalData = () => {
+    if (!confirm("Clear stored daily history and reset preferences on this device?")) return;
+    try {
+      ["smartbin-daily","smartbin-theme","smartbin-sound","smartbin-refresh","smartbin-units","smartbin-notif"]
+        .forEach((k) => localStorage.removeItem(k));
+    } catch (_) {}
+    window.location.reload();
+  };
+
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
       <Card title="Appearance">
         <div className="space-y-4">
           <div>
-            <div className="text-xs text-slate-500 mb-2">Theme</div>
+            <div className="text-xs text-slate-500 mb-2">Theme · currently <b>{themeLabel}</b></div>
             <div className="flex gap-2 flex-wrap">
-              {["Light","Dark","System"].map((t) =>
-                <Pill key={t} label={t} active={theme === t} onClick={() => setTheme(t)} />)}
+              {["Light","Dark"].map((t) =>
+                <Pill key={t} label={t} active={themeLabel === t} onClick={() => setTheme(t)} />)}
             </div>
           </div>
-          <div>
-            <div className="text-xs text-slate-500 mb-2">Accent color</div>
-            <div className="flex gap-2 flex-wrap">
-              {[
-                { l: "Emerald", c: "#10b981" }, { l: "Sky", c: "#0ea5e9" },
-                { l: "Indigo", c: "#6366f1" }, { l: "Rose", c: "#f43f5e" }, { l: "Amber", c: "#f59e0b" },
-              ].map((o) =>
-                <Pill key={o.l} label={o.l} color={o.c} active={accent === o.l} onClick={() => setAccent(o.l)} />)}
-            </div>
-          </div>
+          <p className="text-[11px] text-slate-500">Your choice is saved in this browser.</p>
         </div>
       </Card>
 
       <Card title="Notifications">
         <div className="space-y-4">
           <Row label="Critical-bin sound alert" sub="Beep when a bin crosses the critical fill threshold">
-            <button onClick={() => setSound(!sound)}
-              className={`relative w-12 h-7 rounded-full transition ${sound ? "bg-emerald-500" : "bg-slate-300"}`}>
-              <span className={`absolute top-0.5 ${sound ? "right-0.5" : "left-0.5"} h-6 w-6 bg-white rounded-full shadow transition`} />
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={previewBeep} disabled={!sound || beepPreviewing}
+                      className="text-xs px-2.5 py-1 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-40">
+                {beepPreviewing ? "Beeping…" : "Preview"}
+              </button>
+              <button onClick={() => setSound(!sound)}
+                className={`relative w-12 h-7 rounded-full transition ${sound ? "bg-emerald-500" : "bg-slate-300"}`}>
+                <span className={`absolute top-0.5 ${sound ? "right-0.5" : "left-0.5"} h-6 w-6 bg-white rounded-full shadow transition`} />
+              </button>
+            </div>
           </Row>
-          <Row label="Browser notifications" sub="System push when a bin needs collection">
-            <button onClick={() => Notification.requestPermission().catch(() => {})}
-              className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50">Enable</button>
+          <Row label="Browser notifications"
+               sub={notifEnabled && notifPerm === "granted"
+                   ? "Enabled — system push will fire on critical alerts."
+                   : notifPerm === "denied"
+                   ? "Blocked in your browser settings."
+                   : "System push when a bin needs collection"}>
+            {notifEnabled && notifPerm === "granted" ? (
+              <button onClick={() => setNotifEnabled(false)}
+                      className="text-xs px-3 py-1.5 rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50">Disable</button>
+            ) : (
+              <button onClick={handleEnableNotif}
+                      disabled={notifPerm === "denied"}
+                      className="text-xs px-3 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 disabled:opacity-50">Enable</button>
+            )}
           </Row>
         </div>
       </Card>
@@ -1295,23 +1577,24 @@ function SettingsPage() {
       <Card title="Data">
         <div className="space-y-4">
           <div>
-            <div className="text-xs text-slate-500 mb-2">Auto-refresh every</div>
+            <div className="text-xs text-slate-500 mb-2">Auto-refresh every · currently <b>{refresh}s</b></div>
             <div className="flex gap-2 flex-wrap">
-              {[3, 5, 10, 30].map((s) =>
+              {[2, 3, 5, 10, 30].map((s) =>
                 <Pill key={s} label={`${s} s`} active={refresh === s} onClick={() => setRefresh(s)} />)}
             </div>
           </div>
           <Row label="Units" sub="Distance and weight">
             <select value={units} onChange={(e) => setUnits(e.target.value)}
-              className="text-sm border border-slate-200 rounded-lg px-2 py-1.5">
-              <option>Metric (cm, kg)</option><option>Imperial (in, lb)</option>
+              className="text-sm border border-slate-200 rounded-lg px-2 py-1.5 bg-white">
+              <option value="metric">Metric (cm, kg)</option>
+              <option value="imperial">Imperial (in, lb)</option>
             </select>
           </Row>
-          <Row label="Language" sub="Interface language">
-            <select value={lang} onChange={(e) => setLang(e.target.value)}
-              className="text-sm border border-slate-200 rounded-lg px-2 py-1.5">
-              <option>English</option><option>हिन्दी</option><option>తెలుగు</option>
-            </select>
+          <Row label="Clear stored data" sub="Removes daily history & preferences from this browser">
+            <button onClick={clearLocalData}
+                    className="text-xs px-3 py-1.5 rounded-lg border border-rose-200 text-rose-600 hover:bg-rose-50">
+              Reset
+            </button>
           </Row>
         </div>
       </Card>
