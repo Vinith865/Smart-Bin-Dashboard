@@ -8,7 +8,8 @@ import {
 } from "lucide-react";
 import {
   AreaChart, Area, ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
-  Tooltip, PieChart, Pie, Cell,
+  Tooltip, PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend as RLegend,
+  RadialBarChart, RadialBar,
 } from "recharts";
 
 /* =========================================================================
@@ -380,7 +381,10 @@ export default function SmartBinDashboard() {
       const j = await r.json();
       setRegistry(j.bins || []);
       setDemo(false);
-    } catch { setRegistry(DEMO_BINS); setDemo(true); }
+    } catch {
+      // No demo data — show empty fleet rather than fake bins.
+      setRegistry([]); setDemo(true);
+    }
   }, []);
 
   const loadTelemetry = useCallback(async () => {
@@ -394,7 +398,8 @@ export default function SmartBinDashboard() {
       setLastSync(new Date());
       ingest(j || {});
     } catch {
-      setTelemetry(DEMO_TELEMETRY); setDemo(true); setLastSync(new Date()); ingest(DEMO_TELEMETRY);
+      // No demo data — keep last good telemetry, do NOT inject fake events.
+      setDemo(true); setLastSync(new Date());
     }
   }, []);
 
@@ -433,6 +438,18 @@ export default function SmartBinDashboard() {
     prevCriticalRef.current = nowIds;
   }, [bins, onCritical]);
 
+  // Rolling fleet average over time (last 30 samples — fed to Analytics trend chart)
+  const [trend, setTrend] = useState([]);
+  useEffect(() => {
+    if (!bins.length) return;
+    const avg = Math.round(bins.reduce((s, b) => s + (b.fill || 0), 0) / bins.length);
+    const critical = bins.filter((b) => b.status === "Critical").length;
+    setTrend((prev) => [...prev, {
+      t: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      avg, critical,
+    }].slice(-30));
+  }, [bins]);
+
   return (
     <div className={`${theme === "dark" ? "dark" : ""} min-h-screen bg-slate-50 text-slate-800 font-sans flex`}>
       <ThemeStyles />
@@ -454,7 +471,7 @@ export default function SmartBinDashboard() {
           {page === "Map View"   && <MapViewPage bins={bins} />}
           {page === "Alerts"     && <AlertsPage bins={bins} events={events} />}
           {page === "Routes"     && <RoutesPage bins={bins} />}
-          {page === "Analytics"  && <AnalyticsPage bins={bins} />}
+          {page === "Analytics"  && <AnalyticsPage bins={bins} trend={trend} />}
           {page === "Reports"    && <ReportsPage bins={bins} />}
           {page === "Users"      && <UsersPage />}
           {page === "Devices"    && <DevicesPage bins={bins} />}
@@ -854,65 +871,284 @@ function RoutesPage({ bins }) {
   );
 }
 
-function AnalyticsPage({ bins }) {
-  // status distribution
+function AnalyticsPage({ bins, trend = [] }) {
+  // ---- aggregates ----
+  const total      = bins.length;
+  const active     = bins.filter((b) => b.online).length;
+  const critical   = bins.filter((b) => b.status === "Critical").length;
+  const watch      = bins.filter((b) => b.status === "Watch").length;
+  const offline    = bins.filter((b) => b.status === "Offline").length;
+  const avgFill    = total ? Math.round(bins.reduce((s, b) => s + (b.fill || 0), 0) / total) : 0;
+  const avgBattery = (() => {
+    const w = bins.filter((b) => typeof b.battery === "number");
+    return w.length ? Math.round(w.reduce((s, b) => s + b.battery, 0) / w.length) : 0;
+  })();
+  const avgRssi = (() => {
+    const w = bins.filter((b) => typeof b.rssi === "number" && b.rssi !== 0);
+    return w.length ? Math.round(w.reduce((s, b) => s + b.rssi, 0) / w.length) : 0;
+  })();
+
+  // ---- status distribution (donut) ----
   const status = { Optimal: 0, Watch: 0, Critical: 0, Offline: 0 };
   bins.forEach((b) => status[b.status]++);
   const pieData = Object.entries(status).map(([k, v]) => ({ name: k, value: v, color: STATUS_COLOR[k] }));
 
-  // route buckets
+  // ---- route buckets ----
   const byRoute = {};
-  bins.forEach((b) => { const r = b.route || "—"; if (!byRoute[r]) byRoute[r] = 0; byRoute[r]++; });
-  const routeBars = Object.entries(byRoute).map(([k, v]) => ({ route: k, count: v }));
+  bins.forEach((b) => {
+    const r = b.route || "—";
+    if (!byRoute[r]) byRoute[r] = { route: r, total: 0, avg: 0, sum: 0, critical: 0 };
+    byRoute[r].total++; byRoute[r].sum += b.fill || 0;
+    if (b.status === "Critical") byRoute[r].critical++;
+  });
+  const routeBars = Object.values(byRoute)
+    .map((r) => ({ ...r, avg: r.total ? Math.round(r.sum / r.total) : 0 }))
+    .sort((a, b) => b.avg - a.avg);
 
-  // fill distribution
+  // ---- fill distribution ----
   const buckets = [
-    { range: "0-20%",  max: 20,  count: 0 }, { range: "21-40%", max: 40,  count: 0 },
-    { range: "41-60%", max: 60,  count: 0 }, { range: "61-80%", max: 80,  count: 0 },
-    { range: "81-100%",max: 100, count: 0 },
+    { range: "0-20%",  max: 20,  count: 0, color: "#10b981" },
+    { range: "21-40%", max: 40,  count: 0, color: "#10b981" },
+    { range: "41-60%", max: 60,  count: 0, color: "#f59e0b" },
+    { range: "61-80%", max: 80,  count: 0, color: "#f59e0b" },
+    { range: "81-100%",max: 100, count: 0, color: "#ef4444" },
   ];
   bins.forEach((b) => { const i = buckets.findIndex((x) => b.fill <= x.max); if (i >= 0) buckets[i].count++; });
 
+  // ---- battery distribution ----
+  const battBuckets = [
+    { range: "0-25%",   max: 25,  count: 0, color: "#ef4444" },
+    { range: "26-50%",  max: 50,  count: 0, color: "#f59e0b" },
+    { range: "51-75%",  max: 75,  count: 0, color: "#84cc16" },
+    { range: "76-100%", max: 100, count: 0, color: "#10b981" },
+  ];
+  bins.forEach((b) => {
+    if (typeof b.battery !== "number") return;
+    const i = battBuckets.findIndex((x) => b.battery <= x.max);
+    if (i >= 0) battBuckets[i].count++;
+  });
+
+  // ---- top fullest bins ----
+  const topFull = [...bins].sort((a, b) => (b.fill || 0) - (a.fill || 0)).slice(0, 6)
+    .map((b) => ({ name: b.bin_id, fill: b.fill || 0, color: b.fill >= CRITICAL_AT ? "#ef4444" : b.fill >= WATCH_AT ? "#f59e0b" : "#10b981" }));
+
+  // ---- signal strength per bin ----
+  const rssiBars = bins
+    .filter((b) => typeof b.rssi === "number" && b.rssi !== 0)
+    .map((b) => ({ name: b.bin_id, rssi: b.rssi, color: b.rssi >= -65 ? "#10b981" : b.rssi >= -75 ? "#f59e0b" : "#ef4444" }))
+    .slice(0, 8);
+
+  const noData = total === 0;
+
+  if (noData) {
+    return (
+      <div className="bg-white rounded-xl border border-dashed border-slate-300 p-10 text-center text-slate-500">
+        <BarChart3 className="h-10 w-10 mx-auto text-slate-300 mb-2" />
+        <div className="font-medium text-slate-600">No analytics yet</div>
+        <div className="text-xs">Once your bins start reporting telemetry, the charts will populate automatically.</div>
+      </div>
+    );
+  }
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <Card title="Status distribution">
-        <div style={{ width: "100%", height: 240 }}>
+    <div className="space-y-4">
+      {/* ============ Top KPI strip ============ */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <AnalyticsStat label="Total Bins"      value={total}             icon={Trash2}         tint="emerald" />
+        <AnalyticsStat label="Average Fill"    value={`${avgFill}%`}     icon={Gauge}          tint={avgFill >= CRITICAL_AT ? "rose" : avgFill >= WATCH_AT ? "amber" : "emerald"} />
+        <AnalyticsStat label="Critical Bins"   value={critical}          icon={AlertTriangle}  tint="rose" />
+        <AnalyticsStat label="Active / Online" value={`${active}/${total}`} icon={CheckCircle2} tint="emerald" />
+      </div>
+
+      {/* ============ Fleet average over time (the big hero chart) ============ */}
+      <Card title="Fleet average fill — live trend" actions={<span className="text-xs text-slate-500">{trend.length} samples</span>}>
+        <div style={{ width: "100%", height: 260 }}>
           <ResponsiveContainer>
-            <PieChart>
-              <Pie data={pieData} dataKey="value" innerRadius={55} outerRadius={90} paddingAngle={2} isAnimationActive={false}>
-                {pieData.map((d, i) => <Cell key={i} fill={d.color} />)}
-              </Pie>
-              <Tooltip />
-            </PieChart>
+            <AreaChart data={trend.length ? trend : [{ t: "—", avg: 0, critical: 0 }]} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+              <defs>
+                <linearGradient id="gradAvg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%"   stopColor="#10b981" stopOpacity={0.55} />
+                  <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
+                </linearGradient>
+                <linearGradient id="gradCrit" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%"   stopColor="#ef4444" stopOpacity={0.45} />
+                  <stop offset="100%" stopColor="#ef4444" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="t" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+              <YAxis stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+              <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #e2e8f0" }} />
+              <RLegend verticalAlign="top" height={28} iconType="circle" wrapperStyle={{ fontSize: 12 }} />
+              <Area type="monotone" dataKey="avg" name="Avg fill %" stroke="#10b981" strokeWidth={2.5} fill="url(#gradAvg)" isAnimationActive={false} />
+              <Area type="monotone" dataKey="critical" name="Critical bins" stroke="#ef4444" strokeWidth={2}  fill="url(#gradCrit)" isAnimationActive={false} />
+            </AreaChart>
           </ResponsiveContainer>
         </div>
       </Card>
 
-      <Card title="Fill level distribution">
-        <div style={{ width: "100%", height: 240 }}>
-          <ResponsiveContainer>
-            <BarChart data={buckets} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-              <XAxis dataKey="range" axisLine={false} tickLine={false} fontSize={11} stroke="#94a3b8" />
-              <YAxis hide />
-              <Tooltip cursor={{ fill: "#f1f5f9" }} />
-              <Bar dataKey="count" radius={[8, 8, 0, 0]} fill={STATUS_COLOR.Optimal} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </Card>
+      {/* ============ Status donut + Fill distribution ============ */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card title="Bin status breakdown">
+          <div style={{ width: "100%", height: 260 }}>
+            <ResponsiveContainer>
+              <PieChart>
+                <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={60} outerRadius={100} paddingAngle={3} isAnimationActive={false}>
+                  {pieData.map((d, i) => <Cell key={i} fill={d.color} stroke="none" />)}
+                </Pie>
+                <Tooltip />
+                <RLegend verticalAlign="bottom" iconType="circle" wrapperStyle={{ fontSize: 12 }} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
 
-      <Card title="Bins per route" className="lg:col-span-2">
-        <div style={{ width: "100%", height: 240 }}>
-          <ResponsiveContainer>
-            <BarChart data={routeBars} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-              <XAxis dataKey="route" axisLine={false} tickLine={false} fontSize={11} stroke="#94a3b8" />
-              <YAxis allowDecimals={false} fontSize={11} stroke="#94a3b8" />
-              <Tooltip cursor={{ fill: "#f1f5f9" }} />
-              <Bar dataKey="count" radius={[6, 6, 0, 0]} fill={STATUS_COLOR.Watch} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+        <Card title="Fill level distribution">
+          <div style={{ width: "100%", height: 260 }}>
+            <ResponsiveContainer>
+              <BarChart data={buckets} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="range" axisLine={false} tickLine={false} fontSize={11} stroke="#94a3b8" />
+                <YAxis allowDecimals={false} fontSize={11} stroke="#94a3b8" tickLine={false} axisLine={false} />
+                <Tooltip cursor={{ fill: "rgba(148,163,184,.1)" }} contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #e2e8f0" }} />
+                <Bar dataKey="count" radius={[10, 10, 0, 0]}>
+                  {buckets.map((d, i) => <Cell key={i} fill={d.color} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      </div>
+
+      {/* ============ Top fullest bins (horizontal) + Battery health ============ */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card title="Top fullest bins" actions={<span className="text-xs text-slate-500">live</span>}>
+          <div style={{ width: "100%", height: 260 }}>
+            <ResponsiveContainer>
+              <BarChart data={topFull} layout="vertical" margin={{ top: 10, right: 20, left: 10, bottom: 0 }}>
+                <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" horizontal={false} />
+                <XAxis type="number" domain={[0, 100]} stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} />
+                <YAxis type="category" dataKey="name" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} width={70} />
+                <Tooltip cursor={{ fill: "rgba(148,163,184,.1)" }} contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #e2e8f0" }} />
+                <Bar dataKey="fill" radius={[0, 8, 8, 0]}>
+                  {topFull.map((d, i) => <Cell key={i} fill={d.color} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+
+        <Card title={`Battery health — fleet avg ${avgBattery}%`}>
+          <div style={{ width: "100%", height: 260 }}>
+            <ResponsiveContainer>
+              <BarChart data={battBuckets} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="range" axisLine={false} tickLine={false} fontSize={11} stroke="#94a3b8" />
+                <YAxis allowDecimals={false} fontSize={11} stroke="#94a3b8" tickLine={false} axisLine={false} />
+                <Tooltip cursor={{ fill: "rgba(148,163,184,.1)" }} contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #e2e8f0" }} />
+                <Bar dataKey="count" radius={[10, 10, 0, 0]}>
+                  {battBuckets.map((d, i) => <Cell key={i} fill={d.color} />)}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      </div>
+
+      {/* ============ Average fill per route + Signal strength ============ */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card title="Average fill per route">
+          <div style={{ width: "100%", height: 260 }}>
+            <ResponsiveContainer>
+              <BarChart data={routeBars} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="gradRoute" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%"   stopColor="#0ea5e9" stopOpacity={0.95} />
+                    <stop offset="100%" stopColor="#0369a1" stopOpacity={0.85} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="route" axisLine={false} tickLine={false} fontSize={11} stroke="#94a3b8" />
+                <YAxis fontSize={11} stroke="#94a3b8" tickLine={false} axisLine={false} unit="%" />
+                <Tooltip cursor={{ fill: "rgba(148,163,184,.1)" }} contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #e2e8f0" }} />
+                <Bar dataKey="avg" name="Avg fill %" radius={[8, 8, 0, 0]} fill="url(#gradRoute)" />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+
+        <Card title={`WiFi signal per bin — fleet avg ${avgRssi || "—"} dBm`}>
+          <div style={{ width: "100%", height: 260 }}>
+            {rssiBars.length === 0 ? (
+              <div className="h-full grid place-items-center text-sm text-slate-500">No signal data reported yet</div>
+            ) : (
+              <ResponsiveContainer>
+                <BarChart data={rssiBars} layout="vertical" margin={{ top: 10, right: 20, left: 10, bottom: 0 }}>
+                  <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" horizontal={false} />
+                  <XAxis type="number" domain={[-100, -30]} stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} unit=" dBm" />
+                  <YAxis type="category" dataKey="name" stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} width={70} />
+                  <Tooltip cursor={{ fill: "rgba(148,163,184,.1)" }} contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #e2e8f0" }} />
+                  <Bar dataKey="rssi" radius={[0, 8, 8, 0]}>
+                    {rssiBars.map((d, i) => <Cell key={i} fill={d.color} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      {/* ============ Routes summary table ============ */}
+      <Card title="Route hotspots">
+        <table className="w-full text-sm">
+          <thead className="text-xs text-slate-500">
+            <tr className="text-left">
+              <th className="pb-2">Route</th><th>Bins</th><th>Critical</th><th>Avg fill</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {routeBars.map((r) => (
+              <tr key={r.route}>
+                <td className="py-2 font-medium">{r.route}</td>
+                <td className="text-slate-600">{r.total}</td>
+                <td>
+                  <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: (r.critical ? STATUS_COLOR.Critical : STATUS_COLOR.Optimal) + "22", color: r.critical ? STATUS_COLOR.Critical : STATUS_COLOR.Optimal }}>{r.critical}</span>
+                </td>
+                <td>
+                  <div className="flex items-center gap-2">
+                    <div className="h-1.5 w-32 bg-slate-100 rounded-full overflow-hidden">
+                      <div className="h-full" style={{ width: `${r.avg}%`, background: r.avg >= CRITICAL_AT ? STATUS_COLOR.Critical : r.avg >= WATCH_AT ? STATUS_COLOR.Watch : STATUS_COLOR.Optimal }} />
+                    </div>
+                    <span className="text-xs tabular-nums">{r.avg}%</span>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </Card>
+    </div>
+  );
+}
+
+/* Compact KPI tile for Analytics */
+function AnalyticsStat({ label, value, icon: Icon, tint = "emerald" }) {
+  const tints = {
+    emerald: { bg: "bg-emerald-50", text: "text-emerald-600", ring: "ring-emerald-100" },
+    rose:    { bg: "bg-rose-50",    text: "text-rose-600",    ring: "ring-rose-100"    },
+    amber:   { bg: "bg-amber-50",   text: "text-amber-600",   ring: "ring-amber-100"   },
+    sky:     { bg: "bg-sky-50",     text: "text-sky-600",     ring: "ring-sky-100"     },
+  };
+  const t = tints[tint] || tints.emerald;
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 flex items-center gap-3">
+      <div className={`h-10 w-10 rounded-lg grid place-items-center ${t.bg} ring-1 ${t.ring}`}>
+        <Icon className={`h-5 w-5 ${t.text}`} />
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-[11px] uppercase tracking-wide text-slate-500">{label}</div>
+        <div className="text-xl font-semibold leading-tight">{value}</div>
+      </div>
     </div>
   );
 }
