@@ -71,7 +71,7 @@ function useTheme() {
 function useAppSettings() {
   const read = (k, fallback) => { try { const v = localStorage.getItem(k); return v == null ? fallback : v; } catch { return fallback; } };
   const [sound, setSound]                 = useState(() => read("smartbin-sound", "on") === "on");
-  const [refresh, setRefresh]             = useState(() => parseInt(read("smartbin-refresh", "3"), 10));
+  const [refresh, setRefresh]             = useState(() => parseInt(read("smartbin-refresh", "2"), 10));
   const [units, setUnits]                 = useState(() => read("smartbin-units", "metric"));
   const [notifEnabled, setNotifEnabled]   = useState(() => read("smartbin-notif", "off") === "on");
   useEffect(() => { try { localStorage.setItem("smartbin-sound",   sound ? "on" : "off"); } catch (_) {} }, [sound]);
@@ -381,6 +381,9 @@ export default function SmartBinDashboard() {
   const [criticalFlash, setCriticalFlash] = useState(null);   // {bin_id, at}
   const { theme, toggle: toggleTheme } = useTheme();
   const settings = useAppSettings();
+  const [selectedBinId, setSelectedBinId] = useState(null);
+  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const today = new Date().toISOString().slice(0, 10);
 
   const onCritical = useCallback((newOnes) => {
     if (!newOnes.length) return;
@@ -472,6 +475,25 @@ export default function SmartBinDashboard() {
     }].slice(-30));
   }, [bins]);
 
+  // Per-bin recent samples — last 60 readings per bin for the detail modal trend chart
+  const [binSamples, setBinSamples] = useState({});
+  useEffect(() => {
+    if (!bins.length) return;
+    setBinSamples((prev) => {
+      const next = { ...prev };
+      bins.forEach((b) => {
+        if (!b.live) return;
+        const ts = b.live.updated_at ? b.live.updated_at * 1000 : Date.now();
+        const last = next[b.bin_id]?.[next[b.bin_id].length - 1];
+        if (last && last.ts === ts) return; // already recorded
+        const arr = next[b.bin_id] ? [...next[b.bin_id]] : [];
+        arr.push({ ts, t: new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }), fill: b.fill, battery: b.battery ?? null, rssi: b.rssi ?? null, distance_cm: b.distance_cm ?? null });
+        next[b.bin_id] = arr.slice(-60);
+      });
+      return next;
+    });
+  }, [bins]);
+
   // Per-day rollups persisted to localStorage (last 90 days kept)
   const [daily, setDaily] = useState(() => {
     try { return JSON.parse(localStorage.getItem("smartbin-daily") || "[]"); } catch { return []; }
@@ -506,7 +528,7 @@ export default function SmartBinDashboard() {
       <ThemeStyles />
       <Sidebar active={page} setPage={setPage} />
       <div className="flex-1 flex flex-col min-w-0">
-        <TopBar page={page} lastSync={lastSync} theme={theme} toggleTheme={toggleTheme} bins={bins} setPage={setPage} />
+        <TopBar page={page} lastSync={lastSync} theme={theme} toggleTheme={toggleTheme} bins={bins} setPage={setPage} onPickBin={setSelectedBinId} selectedDate={selectedDate} setSelectedDate={setSelectedDate} today={today} />
         {demo && (
           <div className="px-6 py-2 bg-amber-50 border-b border-amber-200 text-amber-700 text-xs">
             Showing demo data — the API at <code>{API_BASE}</code> isn't reachable yet.
@@ -518,18 +540,28 @@ export default function SmartBinDashboard() {
           </div>
         )}
         <main className="p-6 flex-1 overflow-auto">
-          {page === "Dashboard"  && <DashboardPage bins={bins} onCritical={onCritical} />}
+          {selectedDate !== today && (
+            <HistoricalBanner date={selectedDate} daily={daily} onClear={() => setSelectedDate(today)} />
+          )}
+          {page === "Dashboard"  && <DashboardPage bins={bins} onCritical={onCritical} onPickBin={setSelectedBinId} />}
           {page === "Map View"   && <MapViewPage bins={bins} />}
-          {page === "Alerts"     && <AlertsPage bins={bins} daily={daily} />}
-          {page === "Routes"     && <RoutesPage bins={bins} />}
+          {page === "Alerts"     && <AlertsPage bins={bins} daily={daily} onPickBin={setSelectedBinId} />}
+          {page === "Routes"     && <RoutesPage bins={bins} onPickBin={setSelectedBinId} />}
           {page === "Analytics"  && <AnalyticsPage bins={bins} trend={trend} daily={daily} />}
           {page === "Reports"    && <ReportsPage bins={bins} daily={daily} />}
           {page === "Users"      && <UsersPage />}
-          {page === "Devices"    && <DevicesPage bins={bins} />}
+          {page === "Devices"    && <DevicesPage bins={bins} onPickBin={setSelectedBinId} />}
           {page === "Settings"   && <SettingsPage theme={theme} toggleTheme={toggleTheme} settings={settings} />}
         </main>
         <FooterBar bins={bins} lastSync={lastSync} />
       </div>
+      {selectedBinId && (
+        <BinDetailModal
+          bin={bins.find((b) => b.bin_id === selectedBinId)}
+          samples={binSamples[selectedBinId] || []}
+          onClose={() => setSelectedBinId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -577,7 +609,7 @@ function Sidebar({ active, setPage }) {
 /* =========================================================================
    TopBar
    ========================================================================= */
-function TopBar({ page, lastSync, theme, toggleTheme, bins = [], setPage }) {
+function TopBar({ page, lastSync, theme, toggleTheme, bins = [], setPage, onPickBin, selectedDate, setSelectedDate, today }) {
   const [notifOpen, setNotifOpen] = useState(false);
   const notifRef = useRef(null);
 
@@ -611,11 +643,19 @@ function TopBar({ page, lastSync, theme, toggleTheme, bins = [], setPage }) {
         <p className="text-xs text-slate-500">Real-time overview of SmartBin operations</p>
       </div>
       <div className="hidden md:flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm">
-        All Zones <ChevronDown className="h-4 w-4 text-slate-400" />
-      </div>
-      <div className="hidden lg:flex items-center gap-2 px-3 py-2 rounded-lg border border-slate-200 bg-white text-sm">
         <Calendar className="h-4 w-4 text-slate-400" />
-        {lastSync ? lastSync.toLocaleDateString() : "—"}
+        <input
+          type="date"
+          value={selectedDate || today}
+          max={today}
+          onChange={(e) => setSelectedDate && setSelectedDate(e.target.value || today)}
+          className="bg-transparent outline-none text-sm text-slate-700 cursor-pointer w-[130px]"
+        />
+        {selectedDate && selectedDate !== today && (
+          <button onClick={() => setSelectedDate && setSelectedDate(today)}
+                  title="Back to live"
+                  className="text-xs text-emerald-600 hover:underline">live</button>
+        )}
       </div>
       <ThemeToggle theme={theme} toggle={toggleTheme} />
 
@@ -692,7 +732,7 @@ function FooterBar({ bins, lastSync }) {
 /* =========================================================================
    Dashboard page (the big one)
    ========================================================================= */
-function DashboardPage({ bins, onCritical }) {
+function DashboardPage({ bins, onCritical, onPickBin }) {
   // Derive "Recent Activity" entirely from real bins — no synthetic event store.
   const recent = useMemo(() => {
     return [...bins]
@@ -720,8 +760,11 @@ function DashboardPage({ bins, onCritical }) {
   }, [bins]);
 
 
+  // Show every bin that's NOT optimal — Critical (≥80), Watch (≥50), and Offline
   const critical = useMemo(() =>
-    bins.filter((b) => b.fill >= CRITICAL_AT || b.status === "Offline").slice(0, 5),
+    bins.filter((b) => b.status === "Critical" || b.status === "Watch" || b.status === "Offline")
+        .sort((a, b) => (b.fill || 0) - (a.fill || 0))
+        .slice(0, 8),
   [bins]);
 
   return (
@@ -775,21 +818,32 @@ function DashboardPage({ bins, onCritical }) {
         </Card>
 
         <div className="space-y-4">
-          <Card title="Critical Alerts" actions={<a className="text-xs text-emerald-600">View all</a>}>
-            <ul className="space-y-3">
-              {critical.length === 0 && <li className="text-sm text-slate-500">No critical bins right now 🎉</li>}
-              {critical.map((b) => (
-                <li key={b.bin_id} className="flex items-start gap-3">
-                  <div className={`h-8 w-8 rounded-full grid place-items-center ${b.status === "Critical" ? "bg-rose-50" : "bg-slate-100"}`}>
-                    <AlertTriangle className={`h-4 w-4 ${b.status === "Critical" ? "text-rose-500" : "text-slate-400"}`} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">Bin {b.bin_id} is {b.status === "Offline" ? "offline" : `${b.fill}% full`}</div>
-                    <div className="text-xs text-slate-500 truncate">{b.place}, {b.route}</div>
-                  </div>
-                  <div className="text-[11px] text-slate-400 whitespace-nowrap">just now</div>
-                </li>
-              ))}
+          <Card title={`Active Alerts (${critical.length})`} actions={<span className="text-xs text-slate-500">live</span>}>
+            <ul className="space-y-3 max-h-72 overflow-auto">
+              {critical.length === 0 && <li className="text-sm text-slate-500">All bins healthy 🎉</li>}
+              {critical.map((b) => {
+                const tone = STATUS_COLOR[b.status];
+                return (
+                  <li key={b.bin_id}
+                      onClick={() => onPickBin && onPickBin(b.bin_id)}
+                      className="flex items-start gap-3 cursor-pointer hover:bg-slate-50 rounded-lg p-1 -m-1">
+                    <div className="h-8 w-8 rounded-full grid place-items-center" style={{ background: tone + "22" }}>
+                      <AlertTriangle className="h-4 w-4" style={{ color: tone }} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium truncate">
+                        Bin {b.bin_id} — {b.status === "Offline" ? "offline" : `${b.fill}% full`}
+                      </div>
+                      <div className="text-xs text-slate-500 truncate">
+                        {[b.place, b.route].filter(Boolean).join(" · ") || "—"}
+                      </div>
+                    </div>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full whitespace-nowrap" style={{ background: tone + "22", color: tone }}>
+                      {b.status}
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           </Card>
 
@@ -830,7 +884,9 @@ function DashboardPage({ bins, onCritical }) {
               {recent.map((b) => {
                 const ts = b.live?.updated_at ? new Date(b.live.updated_at * 1000).toLocaleTimeString() : "—";
                 return (
-                  <li key={b.bin_id} className="flex items-start gap-3">
+                  <li key={b.bin_id}
+                      onClick={() => onPickBin && onPickBin(b.bin_id)}
+                      className="flex items-start gap-3 cursor-pointer hover:bg-slate-50 rounded-lg p-1 -m-1">
                     <div className={`h-8 w-8 rounded-full grid place-items-center`} style={{ background: STATUS_COLOR[b.status] + "22" }}>
                       <Trash2 className="h-3.5 w-3.5" style={{ color: STATUS_COLOR[b.status] }} />
                     </div>
@@ -841,6 +897,30 @@ function DashboardPage({ bins, onCritical }) {
                   </li>
                 );
               })}
+            </ul>
+          </Card>
+
+          {/* Fills the space below Recent Activity — top fullest bins with their bars */}
+          <Card title="Top Fullest Bins" actions={<span className="text-[11px] text-slate-500">click to inspect</span>}>
+            <ul className="space-y-2.5 max-h-60 overflow-auto">
+              {bins.length === 0 && <li className="text-sm text-slate-500">No bins yet.</li>}
+              {[...bins]
+                .filter((b) => b.live)
+                .sort((a, b) => (b.fill || 0) - (a.fill || 0))
+                .slice(0, 5)
+                .map((b) => (
+                  <li key={b.bin_id}
+                      onClick={() => onPickBin && onPickBin(b.bin_id)}
+                      className="cursor-pointer hover:bg-slate-50 rounded-lg p-1.5 -m-1.5">
+                    <div className="flex items-center justify-between text-xs mb-1">
+                      <span className="font-medium">{b.bin_id}</span>
+                      <span className="tabular-nums font-medium" style={{ color: STATUS_COLOR[b.status] }}>{b.fill}%</span>
+                    </div>
+                    <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                      <div className="h-full transition-all" style={{ width: `${b.fill}%`, background: STATUS_COLOR[b.status] }} />
+                    </div>
+                  </li>
+                ))}
             </ul>
           </Card>
         </div>
@@ -915,8 +995,14 @@ function MapViewPage({ bins }) {
   );
 }
 
-function AlertsPage({ bins, daily = [] }) {
-  const live = bins.filter((b) => b.fill >= CRITICAL_AT || b.status === "Offline");
+function AlertsPage({ bins, daily = [], onPickBin }) {
+  // Show all non-optimal bins (Watch + Critical + Offline)
+  const live = bins
+    .filter((b) => b.status === "Critical" || b.status === "Watch" || b.status === "Offline")
+    .sort((a, b) => {
+      const order = { Critical: 0, Watch: 1, Offline: 2 };
+      return (order[a.status] - order[b.status]) || (b.fill - a.fill);
+    });
   // Real day-wise alert history from the persistent rollups
   const history = [...daily].reverse().filter((d) => d.critical > 0);
   return (
@@ -926,14 +1012,14 @@ function AlertsPage({ bins, daily = [] }) {
           <thead className="text-xs text-slate-500"><tr className="text-left"><th className="pb-2">Bin</th><th>Location</th><th>Status</th><th className="text-right">Fill</th></tr></thead>
           <tbody className="divide-y divide-slate-100">
             {live.map((b) => (
-              <tr key={b.bin_id}>
+              <tr key={b.bin_id} className="hover:bg-slate-50 cursor-pointer" onClick={() => onPickBin && onPickBin(b.bin_id)}>
                 <td className="py-2 font-medium">{b.bin_id}</td>
                 <td className="text-slate-600">{b.place} · {b.route}</td>
                 <td><span className="text-xs px-2 py-0.5 rounded-full" style={{ background: STATUS_COLOR[b.status] + "22", color: STATUS_COLOR[b.status] }}>{b.status}</span></td>
                 <td className="text-right font-medium tabular-nums">{b.fill}%</td>
               </tr>
             ))}
-            {live.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-slate-500">No active alerts — all bins healthy.</td></tr>}
+            {live.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-slate-500">All bins healthy — no Watch, Critical or Offline.</td></tr>}
           </tbody>
         </table>
       </Card>
@@ -954,41 +1040,138 @@ function AlertsPage({ bins, daily = [] }) {
   );
 }
 
-function RoutesPage({ bins }) {
-  const routes = {};
-  bins.forEach((b) => {
-    const r = b.route || "—";
-    if (!routes[r]) routes[r] = { name: r, total: 0, critical: 0, avg: 0, sum: 0 };
-    routes[r].total++; routes[r].sum += b.fill || 0;
-    if (b.status === "Critical") routes[r].critical++;
-  });
-  const list = Object.values(routes).map((r) => ({ ...r, avg: r.total ? Math.round(r.sum / r.total) : 0 }))
-                .sort((a, b) => b.critical - a.critical || b.avg - a.avg);
+function RoutesPage({ bins, onPickBin }) {
+  // Group bins by route
+  const grouped = useMemo(() => {
+    const map = {};
+    bins.forEach((b) => {
+      const r = b.route || "—";
+      if (!map[r]) map[r] = { name: r, bins: [], total: 0, critical: 0, sum: 0 };
+      map[r].bins.push(b);
+      map[r].total++; map[r].sum += b.fill || 0;
+      if (b.status === "Critical") map[r].critical++;
+    });
+    return Object.values(map)
+      .map((r) => ({ ...r, avg: r.total ? Math.round(r.sum / r.total) : 0 }))
+      .sort((a, b) => b.critical - a.critical || b.avg - a.avg);
+  }, [bins]);
+
+  const [open, setOpen] = useState({});
+  const toggle = (name) => setOpen((o) => ({ ...o, [name]: !o[name] }));
+
+  // Open "all bins on this route" as a multi-stop Google Maps URL
+  const openRouteOnMaps = (route) => {
+    const coords = route.bins
+      .map((b) => ({ lat: parseFloat(b.latitude), lng: parseFloat(b.longitude) }))
+      .filter((c) => !isNaN(c.lat) && !isNaN(c.lng));
+    if (coords.length === 0) return;
+    if (coords.length === 1) {
+      window.open(`https://www.google.com/maps/search/?api=1&query=${coords[0].lat},${coords[0].lng}`, "_blank");
+      return;
+    }
+    // Use Google Maps Directions with origin = first, destination = last, waypoints between
+    const origin      = `${coords[0].lat},${coords[0].lng}`;
+    const destination = `${coords[coords.length - 1].lat},${coords[coords.length - 1].lng}`;
+    const waypoints   = coords.slice(1, -1).map((c) => `${c.lat},${c.lng}`).join("|");
+    const url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${destination}` +
+                (waypoints ? `&waypoints=${encodeURIComponent(waypoints)}` : "");
+    window.open(url, "_blank");
+  };
+
   return (
-    <Card title={`Routes (${list.length})`}>
-      <table className="w-full text-sm">
-        <thead className="text-xs text-slate-500"><tr className="text-left"><th className="pb-2">Route</th><th>Bins</th><th>Critical</th><th>Average fill</th></tr></thead>
-        <tbody className="divide-y divide-slate-100">
-          {list.map((r) => (
-            <tr key={r.name}>
-              <td className="py-2 font-medium">{r.name}</td>
-              <td className="text-slate-600">{r.total}</td>
-              <td><span className="text-xs px-2 py-0.5 rounded-full"
-                       style={{ background: (r.critical ? STATUS_COLOR.Critical : STATUS_COLOR.Optimal) + "22",
-                                color: r.critical ? STATUS_COLOR.Critical : STATUS_COLOR.Optimal }}>{r.critical}</span></td>
-              <td>
-                <div className="flex items-center gap-2">
-                  <div className="h-1.5 w-32 bg-slate-100 rounded-full overflow-hidden">
-                    <div className="h-full" style={{ width: `${r.avg}%`, background: r.avg >= CRITICAL_AT ? STATUS_COLOR.Critical : r.avg >= WATCH_AT ? STATUS_COLOR.Watch : STATUS_COLOR.Optimal }} />
+    <Card title={`Routes (${grouped.length})`}>
+      <div className="space-y-3">
+        {grouped.map((r) => {
+          const isOpen = !!open[r.name];
+          return (
+            <div key={r.name} className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="flex items-center gap-3 px-4 py-3 bg-slate-50 hover:bg-slate-100 cursor-pointer"
+                   onClick={() => toggle(r.name)}>
+                <ChevronDown className={`h-4 w-4 text-slate-400 transition-transform ${isOpen ? "rotate-0" : "-rotate-90"}`} />
+                <div className="font-medium">{r.name}</div>
+                <span className="text-xs text-slate-500">{r.total} bins</span>
+                <span className="text-xs px-2 py-0.5 rounded-full"
+                      style={{ background: (r.critical ? STATUS_COLOR.Critical : STATUS_COLOR.Optimal) + "22",
+                               color: r.critical ? STATUS_COLOR.Critical : STATUS_COLOR.Optimal }}>
+                  {r.critical} critical
+                </span>
+                <div className="ml-auto flex items-center gap-2">
+                  <div className="hidden md:flex items-center gap-2">
+                    <div className="h-1.5 w-32 bg-slate-200 rounded-full overflow-hidden">
+                      <div className="h-full"
+                           style={{ width: `${r.avg}%`,
+                                    background: r.avg >= CRITICAL_AT ? STATUS_COLOR.Critical : r.avg >= WATCH_AT ? STATUS_COLOR.Watch : STATUS_COLOR.Optimal }} />
+                    </div>
+                    <span className="text-xs tabular-nums">{r.avg}%</span>
                   </div>
-                  <span className="text-xs tabular-nums">{r.avg}%</span>
+                  <button onClick={(e) => { e.stopPropagation(); openRouteOnMaps(r); }}
+                          className="text-xs px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white inline-flex items-center gap-1">
+                    <RouteIcon className="h-3.5 w-3.5" /> Route map
+                  </button>
                 </div>
-              </td>
-            </tr>
-          ))}
-          {list.length === 0 && <tr><td colSpan={4} className="py-6 text-center text-slate-500">No bins yet.</td></tr>}
-        </tbody>
-      </table>
+              </div>
+
+              {isOpen && (
+                <table className="w-full text-sm">
+                  <thead className="text-xs text-slate-500">
+                    <tr className="text-left border-b border-slate-100">
+                      <th className="px-4 py-2">Bin</th>
+                      <th>Location</th>
+                      <th>Status</th>
+                      <th>Fill</th>
+                      <th className="text-right px-4">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {r.bins.map((b) => {
+                      const lat = parseFloat(b.latitude), lng = parseFloat(b.longitude);
+                      const hasGeo = !isNaN(lat) && !isNaN(lng);
+                      return (
+                        <tr key={b.bin_id} className="hover:bg-slate-50">
+                          <td className="px-4 py-2 font-medium cursor-pointer" onClick={() => onPickBin && onPickBin(b.bin_id)}>
+                            {b.bin_id}
+                          </td>
+                          <td className="text-slate-600">{b.place || "—"}</td>
+                          <td>
+                            <span className="text-xs px-2 py-0.5 rounded-full"
+                                  style={{ background: STATUS_COLOR[b.status] + "22", color: STATUS_COLOR[b.status] }}>
+                              {b.status}
+                            </span>
+                          </td>
+                          <td className="tabular-nums">{b.fill}%</td>
+                          <td className="px-4 py-2 text-right">
+                            <div className="inline-flex gap-1.5">
+                              <button onClick={() => onPickBin && onPickBin(b.bin_id)}
+                                      className="text-xs px-2 py-1 rounded-md border border-slate-200 hover:bg-white">
+                                Details
+                              </button>
+                              {hasGeo && (
+                                <>
+                                  <a href={`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`}
+                                     target="_blank" rel="noopener noreferrer"
+                                     className="text-xs px-2 py-1 rounded-md border border-slate-200 hover:bg-white inline-flex items-center gap-1">
+                                    <MapPin className="h-3 w-3" /> Locate
+                                  </a>
+                                  <a href={`https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`}
+                                     target="_blank" rel="noopener noreferrer"
+                                     className="text-xs px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white inline-flex items-center gap-1">
+                                    Directions
+                                  </a>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          );
+        })}
+        {grouped.length === 0 && <div className="py-6 text-center text-slate-500">No bins yet.</div>}
+      </div>
     </Card>
   );
 }
@@ -1459,22 +1642,41 @@ function UsersPage() {
   );
 }
 
-function DevicesPage({ bins }) {
+function DevicesPage({ bins, onPickBin }) {
   return (
-    <Card title={`Devices (${bins.length})`}>
+    <Card title={`Devices (${bins.length})`} actions={<span className="text-xs text-slate-500">Click a row for details</span>}>
       <table className="w-full text-sm">
-        <thead className="text-xs text-slate-500"><tr className="text-left"><th className="pb-2">Bin</th><th>Thing</th><th>Signal</th><th>Battery</th><th>Status</th></tr></thead>
+        <thead className="text-xs text-slate-500"><tr className="text-left"><th className="pb-2 pl-2">Bin</th><th>Thing</th><th>Signal</th><th>Battery</th><th>Fill</th><th>Status</th><th className="text-right pr-2">Actions</th></tr></thead>
         <tbody className="divide-y divide-slate-100">
-          {bins.map((b) => (
-            <tr key={b.bin_id}>
-              <td className="py-2 font-medium">{b.bin_id}</td>
-              <td className="text-slate-600 font-mono text-xs">{b.thing_name || `esp32-smartbin-${b.bin_id}`}</td>
-              <td>{b.rssi != null ? `${b.rssi} dBm` : "—"}</td>
-              <td>{b.battery != null ? `${b.battery}%` : "—"}</td>
-              <td><span className="text-xs px-2 py-0.5 rounded-full" style={{ background: STATUS_COLOR[b.status] + "22", color: STATUS_COLOR[b.status] }}>{b.online ? "Online" : "Offline"}</span></td>
-            </tr>
-          ))}
-          {bins.length === 0 && <tr><td colSpan={5} className="py-6 text-center text-slate-500">No devices yet.</td></tr>}
+          {bins.map((b) => {
+            const lat = parseFloat(b.latitude), lng = parseFloat(b.longitude);
+            const hasGeo = !isNaN(lat) && !isNaN(lng);
+            return (
+              <tr key={b.bin_id} className="hover:bg-slate-50 cursor-pointer"
+                  onClick={() => onPickBin && onPickBin(b.bin_id)}>
+                <td className="py-2 pl-2 font-medium">{b.bin_id}</td>
+                <td className="text-slate-600 font-mono text-xs">{b.thing_name || `esp32-smartbin-${b.bin_id}`}</td>
+                <td className="tabular-nums">{b.rssi != null && b.rssi !== 0 ? `${b.rssi} dBm` : "—"}</td>
+                <td className="tabular-nums">{b.battery != null ? `${b.battery}%` : "—"}</td>
+                <td className="tabular-nums">{b.fill}%</td>
+                <td><span className="text-xs px-2 py-0.5 rounded-full" style={{ background: STATUS_COLOR[b.status] + "22", color: STATUS_COLOR[b.status] }}>{b.online ? "Online" : "Offline"}</span></td>
+                <td className="text-right pr-2">
+                  <div className="inline-flex gap-1.5" onClick={(e) => e.stopPropagation()}>
+                    <button onClick={() => onPickBin && onPickBin(b.bin_id)}
+                            className="text-xs px-2 py-1 rounded-md border border-slate-200 hover:bg-white">Details</button>
+                    {hasGeo && (
+                      <a href={`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`}
+                         target="_blank" rel="noopener noreferrer"
+                         className="text-xs px-2 py-1 rounded-md border border-slate-200 hover:bg-white inline-flex items-center gap-1">
+                        <MapPin className="h-3 w-3" /> Map
+                      </a>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+          {bins.length === 0 && <tr><td colSpan={7} className="py-6 text-center text-slate-500">No devices yet.</td></tr>}
         </tbody>
       </table>
     </Card>
@@ -1627,6 +1829,171 @@ function Row({ label, sub, children }) {
         {sub && <div className="text-xs text-slate-500">{sub}</div>}
       </div>
       {children}
+    </div>
+  );
+}
+
+/* =========================================================================
+   Historical data banner — shown when user picks a past date in TopBar
+   ========================================================================= */
+function HistoricalBanner({ date, daily, onClear }) {
+  const row = daily.find((d) => d.date === date);
+  return (
+    <div className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-3 flex items-center gap-4">
+      <Calendar className="h-5 w-5 text-indigo-600 shrink-0" />
+      <div className="flex-1 min-w-0">
+        <div className="text-sm font-semibold text-indigo-900">Historical view · {date}</div>
+        {row ? (
+          <div className="text-xs text-indigo-700 mt-0.5">
+            {row.total} bins · Avg fill <b>{row.avg}%</b> · Peak fill <b>{row.peak}%</b> · Peak critical <b>{row.critical}</b> · Watch {row.watch} · Offline {row.offline} · {row.samples} samples
+          </div>
+        ) : (
+          <div className="text-xs text-indigo-700 mt-0.5">No data recorded for this date.</div>
+        )}
+      </div>
+      <button onClick={onClear}
+              className="text-xs px-3 py-1.5 rounded-lg bg-white border border-indigo-200 text-indigo-700 hover:bg-indigo-100">
+        Back to live
+      </button>
+    </div>
+  );
+}
+
+/* =========================================================================
+   Bin detail modal — per-bin analysis (status, trend, map link)
+   ========================================================================= */
+function BinDetailModal({ bin, samples = [], onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  if (!bin) return null;
+  const lat = parseFloat(bin.latitude), lng = parseFloat(bin.longitude);
+  const mapsUrl = !isNaN(lat) && !isNaN(lng)
+    ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`
+    : null;
+  const dirUrl = !isNaN(lat) && !isNaN(lng)
+    ? `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`
+    : null;
+  const tone = STATUS_COLOR[bin.status] || STATUS_COLOR.Offline;
+  const last = bin.live?.updated_at ? new Date(bin.live.updated_at * 1000).toLocaleString() : "—";
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-900/50 backdrop-blur-sm px-4 py-8 overflow-auto"
+         onClick={onClose}>
+      <div className="bg-white rounded-2xl border border-slate-200 w-full max-w-4xl shadow-2xl"
+           onClick={(e) => e.stopPropagation()}>
+        {/* header */}
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-4">
+          <div className="h-12 w-12 rounded-xl grid place-items-center" style={{ background: tone + "22" }}>
+            <Trash2 className="h-6 w-6" style={{ color: tone }} />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="text-lg font-semibold truncate">{bin.bin_name || bin.bin_id}</div>
+            <div className="text-xs text-slate-500">
+              {bin.bin_id} · {bin.route || "—"} · {bin.ward || "—"} · {bin.place || "—"}
+            </div>
+          </div>
+          <span className="text-xs px-3 py-1 rounded-full font-medium" style={{ background: tone + "22", color: tone }}>
+            {bin.status}
+          </span>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 text-2xl leading-none px-2">×</button>
+        </div>
+
+        {/* KPI strip */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 px-6 py-4 border-b border-slate-100">
+          <StatTile icon={Gauge}   label="Fill Level"   value={`${bin.fill}%`} tint={bin.status === "Critical" ? "rose" : bin.status === "Watch" ? "amber" : "emerald"} />
+          <StatTile icon={Battery} label="Battery"      value={typeof bin.battery === "number" ? `${bin.battery}%` : "—"} tint={(bin.battery ?? 100) < 30 ? "rose" : "emerald"} />
+          <StatTile icon={Signal}  label="WiFi (RSSI)"  value={typeof bin.rssi === "number" && bin.rssi !== 0 ? `${bin.rssi} dBm` : "—"} tint="sky" />
+          <StatTile icon={Activity} label="Distance"    value={typeof bin.distance_cm === "number" ? `${bin.distance_cm.toFixed(1)} cm` : "—"} tint="slate" />
+        </div>
+
+        {/* trend */}
+        <div className="px-6 py-4 border-b border-slate-100">
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-sm font-semibold">Recent fill trend</div>
+            <div className="text-[11px] text-slate-500">{samples.length} samples</div>
+          </div>
+          <div style={{ width: "100%", height: 200 }}>
+            {samples.length < 2 ? (
+              <div className="h-full grid place-items-center text-sm text-slate-500">Collecting samples…</div>
+            ) : (
+              <ResponsiveContainer>
+                <AreaChart data={samples} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="binFillGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%"   stopColor={tone} stopOpacity={0.55} />
+                      <stop offset="100%" stopColor={tone} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                  <XAxis dataKey="t" stroke="#94a3b8" fontSize={10} tickLine={false} axisLine={false} />
+                  <YAxis domain={[0, 100]} stroke="#94a3b8" fontSize={10} tickLine={false} axisLine={false} unit="%" />
+                  <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12, border: "1px solid #e2e8f0" }} />
+                  <Area type="monotone" dataKey="fill" stroke={tone} strokeWidth={2.5} fill="url(#binFillGrad)" isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* metadata grid */}
+        <div className="px-6 py-4 border-b border-slate-100 grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2 text-sm">
+          <MetaRow label="Bin ID"     value={bin.bin_id} />
+          <MetaRow label="Capacity"   value={bin.capacity ? `${bin.capacity} L` : "—"} />
+          <MetaRow label="Last seen"  value={last} />
+          <MetaRow label="Latitude"   value={isNaN(lat) ? "—" : lat.toFixed(5)} />
+          <MetaRow label="Longitude"  value={isNaN(lng) ? "—" : lng.toFixed(5)} />
+          <MetaRow label="Online"     value={bin.online ? "Yes" : "No"} />
+        </div>
+
+        {/* actions */}
+        <div className="px-6 py-4 flex flex-wrap items-center justify-end gap-2">
+          {mapsUrl && (
+            <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+               className="text-sm px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50 inline-flex items-center gap-2">
+              <MapPin className="h-4 w-4 text-slate-500" /> Open in Google Maps
+            </a>
+          )}
+          {dirUrl && (
+            <a href={dirUrl} target="_blank" rel="noopener noreferrer"
+               className="text-sm px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white inline-flex items-center gap-2">
+              <RouteIcon className="h-4 w-4" /> Get Directions
+            </a>
+          )}
+          <button onClick={onClose}
+                  className="text-sm px-3 py-2 rounded-lg border border-slate-200 hover:bg-slate-50">Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StatTile({ icon: Icon, label, value, tint = "emerald" }) {
+  const tints = {
+    emerald: "text-emerald-600 bg-emerald-50",
+    rose:    "text-rose-600 bg-rose-50",
+    amber:   "text-amber-600 bg-amber-50",
+    sky:     "text-sky-600 bg-sky-50",
+    slate:   "text-slate-600 bg-slate-100",
+  };
+  return (
+    <div className="rounded-lg border border-slate-200 p-3 bg-white">
+      <div className="flex items-center gap-2">
+        <div className={`h-8 w-8 rounded-md grid place-items-center ${tints[tint]}`}><Icon className="h-4 w-4" /></div>
+        <div className="text-[11px] uppercase tracking-wide text-slate-500">{label}</div>
+      </div>
+      <div className="mt-2 text-xl font-semibold tabular-nums">{value}</div>
+    </div>
+  );
+}
+
+function MetaRow({ label, value }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-slate-500">{label}</span>
+      <span className="font-medium tabular-nums truncate">{value}</span>
     </div>
   );
 }
