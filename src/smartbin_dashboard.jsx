@@ -769,13 +769,12 @@ function DashboardPage({ bins, onCritical, onPickBin }) {
 
   return (
     <div className="space-y-6">
-      {/* KPI row */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-        <Kpi icon={Trash2}      label="Total Bins"        value={kpis.total} sub="All locations"    accent="emerald" data={spark(1)} />
-        <Kpi icon={CheckCircle2} label="Active Bins"       value={kpis.active} sub={`${kpis.total ? Math.round(kpis.active*100/kpis.total) : 0}% Online`} accent="emerald" data={spark(2)} />
-        <Kpi icon={AlertTriangle} label="Full Bins"       value={kpis.full} sub={`${kpis.total ? Math.round(kpis.full*100/kpis.total) : 0}% Full`}   accent="rose"     data={spark(3)} />
-        <Kpi icon={Gauge}        label="Average Fill Level" value={`${kpis.avg}%`} sub="+5% vs last 7 days" accent="amber"   data={spark(4)} />
-        <Kpi icon={Leaf}         label="CO₂ Saved"        value="1.24 t" sub="This month"  accent="emerald" data={spark(6)} />
+      {/* KPI row — 4 cards, each takes 1/4 of the width on large screens */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Kpi icon={Trash2}        label="Total Bins"         value={kpis.total}  sub="All locations" accent="emerald" data={spark(1)} />
+        <Kpi icon={CheckCircle2}  label="Active Bins"        value={kpis.active} sub={`${kpis.total ? Math.round(kpis.active*100/kpis.total) : 0}% Online`} accent="emerald" data={spark(2)} />
+        <Kpi icon={AlertTriangle} label="Full Bins"          value={kpis.full}   sub={`${kpis.total ? Math.round(kpis.full*100/kpis.total) : 0}% Full`}    accent="rose"    data={spark(3)} />
+        <Kpi icon={Gauge}         label="Average Fill Level" value={`${kpis.avg}%`} sub={kpis.avg >= CRITICAL_AT ? "Fleet critical" : kpis.avg >= WATCH_AT ? "Approaching limit" : "Healthy"} accent="amber" data={spark(4)} />
       </div>
 
       {/* Map + right column */}
